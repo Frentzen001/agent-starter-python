@@ -39,6 +39,11 @@ except ImportError:
     logger.warning("rclpy not found — ROS 2 eye expression publishing disabled.")
 
 # ---------------------------------------------------------------------------
+# Eye expression — set to False to disable without removing any code
+# ---------------------------------------------------------------------------
+EYE_EXPRESSION_ENABLED = False
+
+# ---------------------------------------------------------------------------
 # Eye expression mapping
 # ---------------------------------------------------------------------------
 EMOTION_MAP: dict[str, int] = {
@@ -80,7 +85,7 @@ class ROS2EyePublisher:
 # ---------------------------------------------------------------------------
 _eye_publisher: ROS2EyePublisher | None = None
 
-if ROS2_AVAILABLE:
+if EYE_EXPRESSION_ENABLED and ROS2_AVAILABLE:
     try:
         if not rclpy.ok():
             rclpy.init()
@@ -132,7 +137,7 @@ Use the knowledge base above to answer questions accurately. If something is not
         emotion = emotion.lower().strip()
         value = EMOTION_MAP.get(emotion, 0)
         logger.info(f"Eye expression → {emotion} ({value})")
-        if _eye_publisher:
+        if EYE_EXPRESSION_ENABLED and _eye_publisher:
             _eye_publisher.publish(value)
         return f"Eye expression set to {emotion}."
 
