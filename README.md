@@ -140,7 +140,7 @@ Instead of RAG, all Garage@EEE information is loaded **once at startup** from an
 **Source file:**
 
 ```
-Garage@EEE's Website Database.xlsx   ← place in the repo root (FYP/)
+src/Garage@EEEWebsiteDatabase.xlsx   ← place alongside knowledge.py in src/
 ```
 
 The path is resolved automatically. Override it with the `GARAGE_XLSX` environment variable if needed:

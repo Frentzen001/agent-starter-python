@@ -19,7 +19,7 @@ logger = logging.getLogger("knowledge")
 # ---------------------------------------------------------------------------
 # Locate the xlsx
 # ---------------------------------------------------------------------------
-_DEFAULT_XLSX = Path(__file__).parent.parent.parent / "Garage@EEE's Website Database.xlsx"
+_DEFAULT_XLSX = Path(__file__).parent / "Garage@EEEWebsiteDatabase.xlsx"
 _XLSX_PATH = Path(os.environ.get("GARAGE_XLSX", str(_DEFAULT_XLSX)))
 
 
