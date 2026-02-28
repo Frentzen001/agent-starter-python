@@ -13,6 +13,7 @@ dependencies = [
     "livekit-agents[silero,turn-detector]~=1.4",
     "livekit-plugins-noise-cancellation~=0.2",
     "onnxruntime<1.22",
+    "openpyxl>=3.1.5",
     "playwright>=1.58.0",
     "python-dotenv",
     "tavily-python>=0.7.21",

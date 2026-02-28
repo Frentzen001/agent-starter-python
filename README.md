@@ -95,6 +95,88 @@ In production, use the `start` command:
 uv run python src/agent.py start
 ```
 
+## More-Tea: Garage@EEE Tour Guide Customisations
+
+This project extends the base LiveKit starter with two features that turn the agent into **More-Tea**, a voice-controlled robot tour guide for [Garage@EEE](https://garage.eee.ntu.edu.sg/) at NTU Open House.
+
+### ROS 2 Eye Expression Publishing (`src/agent_example.py`)
+
+More-Tea can display emotions on a physical robot's LED eyes by publishing integer values to the `/eye_expression` ROS 2 topic.
+
+**How it works:**
+
+- At startup, the agent tries to import `rclpy`. If ROS 2 is not installed, it falls back gracefully and eye expressions are disabled (no crash).
+- A `ROS2EyePublisher` node is spun inside a daemon `MultiThreadedExecutor` thread so it never blocks the LiveKit event loop.
+- The `set_eye_expression` function tool is exposed to the LLM. The LLM is instructed to call it at the start of every response and whenever its emotional tone changes.
+
+**Emotion → integer mapping:**
+
+| Emotion   | Value |
+|-----------|-------|
+| neutral   | 0     |
+| happy     | 1     |
+| sad       | 2     |
+| angry     | 3     |
+| confused  | 4     |
+| shocked   | 5     |
+| love      | 6     |
+| shy       | 7     |
+
+**ROS 2 dependency (optional):**
+
+```bash
+# Inside a sourced ROS 2 Humble workspace:
+pip install rclpy
+```
+
+If `rclpy` is not available, the agent runs normally — eye expressions are simply skipped.
+
+---
+
+### Garage@EEE Knowledge Base (`src/knowledge.py`)
+
+Instead of RAG, all Garage@EEE information is loaded **once at startup** from an xlsx database and injected directly into the agent's system prompt. This gives zero per-query latency and 100% recall — critical for a low-latency voice agent.
+
+**Source file:**
+
+```
+Garage@EEE's Website Database.xlsx   ← place in the repo root (FYP/)
+```
+
+The path is resolved automatically. Override it with the `GARAGE_XLSX` environment variable if needed:
+
+```bash
+export GARAGE_XLSX=/path/to/your/database.xlsx
+```
+
+**Extracted content (17 KB, ~4,400 tokens):**
+
+| Sheet | What is extracted |
+|---|---|
+| Home | About text and objectives |
+| Facilities | All 9 facilities with descriptions |
+| Events | 7 events (STARTathon, GEEEnius, Enitio, Escendo, IdeasJam, Innovation Festival, Makerspace Friendlies) |
+| Ambassadors | All 6 ambassador portfolio descriptions |
+| Tinkering Project | Intro, how to join, funding ($200), FAQs |
+| Innotrack | Description, funding ($999), FAQs |
+| Launchpad | Description, funding ($999), FAQs |
+| Project Openings | All current active projects |
+| Project Info | Notable past projects |
+
+**Dependency:**
+
+`openpyxl` is required to parse the xlsx. It is already added to the project via `uv add openpyxl`. If the file is missing at runtime, `knowledge.py` falls back to a hardcoded minimal summary so the agent still starts.
+
+**Running with the knowledge base:**
+
+```console
+uv run python src/agent_example.py console
+```
+
+No extra steps needed — `knowledge.py` is imported at startup and the knowledge is embedded in the system prompt automatically.
+
+---
+
 ## Frontend & Telephony
 
 Get started quickly with our pre-built frontend starter apps, or add telephony support:
