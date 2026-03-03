@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import threading
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -25,18 +25,18 @@ logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
 # ---------------------------------------------------------------------------
-# ROS 2 optional imports — needed for eye expression publishing
+# ROS 2 — eye expression publishing via ROS2Connector
 # ---------------------------------------------------------------------------
 try:
-    import rclpy
-    import rclpy.executors
-    from rclpy.node import Node
     from std_msgs.msg import Int32
 
     ROS2_AVAILABLE = True
 except ImportError:
+    Int32 = None  # type: ignore[assignment]
     ROS2_AVAILABLE = False
-    logger.warning("rclpy not found — ROS 2 eye expression publishing disabled.")
+    logger.warning("std_msgs not found — ROS 2 eye expression publishing disabled.")
+
+from ros2_connector import ROS2Connector
 
 # ---------------------------------------------------------------------------
 # Eye expression — set to False to disable without removing any code
@@ -59,47 +59,9 @@ EMOTION_MAP: dict[str, int] = {
 
 
 # ---------------------------------------------------------------------------
-# ROS 2 Eye Publisher
+# ROS 2 connector singleton — started lazily inside my_agent()
 # ---------------------------------------------------------------------------
-class ROS2EyePublisher:
-    """Publishes eye-expression integers to /eye_expression."""
-
-    def __init__(self, executor: "rclpy.executors.Executor") -> None:
-        self._node = Node("agent_eye")
-        self._pub = self._node.create_publisher(Int32, "/eye_expression", 10)
-        executor.add_node(self._node)
-        logger.info("ROS2EyePublisher: ready, publishing to /eye_expression")
-
-    def publish(self, value: int) -> None:
-        msg = Int32()
-        msg.data = value
-        self._pub.publish(msg)
-        logger.info(f"ROS2: published eye_expression={value}")
-
-    def shutdown(self) -> None:
-        self._node.destroy_node()
-
-
-# ---------------------------------------------------------------------------
-# Global ROS 2 eye publisher singleton
-# ---------------------------------------------------------------------------
-_eye_publisher: ROS2EyePublisher | None = None
-
-if EYE_EXPRESSION_ENABLED and ROS2_AVAILABLE:
-    try:
-        if not rclpy.ok():
-            rclpy.init()
-        _standalone_executor = rclpy.executors.MultiThreadedExecutor()
-        _ros2_eye_thread = threading.Thread(
-            target=_standalone_executor.spin,
-            daemon=True,
-            name="ros2_eye_executor",
-        )
-        _ros2_eye_thread.start()
-        _eye_publisher = ROS2EyePublisher(_standalone_executor)
-        logger.info("ROS 2 eye publisher initialised.")
-    except Exception as exc:
-        logger.warning(f"ROS 2 eye publisher init failed: {exc}")
+_ros2: ROS2Connector | None = ROS2Connector() if EYE_EXPRESSION_ENABLED else None
 
 
 class Assistant(Agent):
@@ -137,8 +99,8 @@ Use the knowledge base above to answer questions accurately. If something is not
         emotion = emotion.lower().strip()
         value = EMOTION_MAP.get(emotion, 0)
         logger.info(f"Eye expression → {emotion} ({value})")
-        if EYE_EXPRESSION_ENABLED and _eye_publisher:
-            _eye_publisher.publish(value)
+        if _ros2 is not None:
+            _ros2.publish("/eye_expression", Int32, {"data": value})
         return f"Eye expression set to {emotion}."
 
     # To add tools, use the @function_tool decorator.
@@ -176,6 +138,10 @@ async def my_agent(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+
+    # Start the ROS 2 connector once the asyncio loop is live
+    if _ros2 is not None and not _ros2._started:
+        _ros2.start(asyncio.get_event_loop())
 
     # Set up a voice AI pipeline using OpenAI, Cartesia, Deepgram, and the LiveKit turn detector
     session = AgentSession(
