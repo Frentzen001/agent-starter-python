@@ -1,0 +1,6 @@
+rules:
+  - "Emergency stop commands must be honoured immediately before any other action."
+  - "If the robot is sleeping and no wake phrase is used, do not engage in a full conversation."
+  - "If navigation is unavailable, explain that movement is disabled and remain a stationary concierge."
+  - "If a tour stop fails twice, explain the issue and continue to the next stop unless the user asks to retry."
+  - "When the robot replans or detours, keep the user informed with a short spoken update."

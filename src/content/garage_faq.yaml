@@ -1,0 +1,25 @@
+faqs:
+  - question: "How do I get started in Garage@EEE?"
+    answer: "Start by speaking to a committee member, understanding the space rules, and exploring the available tools, programmes, and project support in Garage@EEE."
+    keywords: ["start", "getting started", "new here", "orientation"]
+  - question: "How do I get access to the 3D printers?"
+    answer: "3D printer access is usually managed through Garage@EEE onboarding and equipment training. Ask a committee member about the current access process, queueing practice, and safety requirements."
+    keywords: ["3d printer", "3d printers", "printer access", "printing"]
+  - question: "Where can I do electronics work?"
+    answer: "Electronics work is usually done in the Machines Lab and nearby prototyping areas, depending on the tools and bench space you need."
+    keywords: ["electronics", "soldering", "pcb", "electronics work"]
+  - question: "Where can I find screwdrivers and tools?"
+    answer: "General hand tools are kept around the workshop areas. If you cannot find a specific tool, ask a committee member for the latest storage location and sign-out practice."
+    keywords: ["screwdriver", "tools", "hand tools", "tool storage"]
+  - question: "Can I ask for a tour of Garage@EEE?"
+    answer: "Yes. MoreTea can guide a standard Garage tour, and committee members can also help if you want a more detailed introduction to a specific area."
+    keywords: ["tour", "show me around", "guided tour", "garage tour"]
+  - question: "Who should I ask if I need help with a project?"
+    answer: "You can start with a Garage@EEE committee member or student leader in the space. They can point you to the right tools, processes, or people for your project."
+    keywords: ["help", "project help", "committee member", "who can help"]
+  - question: "Are there safety rules I should know before using the space?"
+    answer: "Yes. Follow the workshop rules, use equipment only after proper onboarding or training, and ask for help whenever you are unsure about a tool or process."
+    keywords: ["safety", "rules", "safe", "training"]
+  - question: "What kinds of things do students build in Garage@EEE?"
+    answer: "Students use Garage@EEE for prototyping, electronics work, fabrication, team projects, and showcasing ideas from coursework, competitions, and independent builds."
+    keywords: ["projects", "build", "what do students make", "showcase"]

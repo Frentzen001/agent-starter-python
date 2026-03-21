@@ -116,6 +116,9 @@ class ROS2Connector:
         self._nav_active: bool = False
         self._cancel_requested: bool = False
         self._distance_remaining: float | None = None
+        self._recovery_count: int = 0
+        self._replan_count: int = 0
+        self._last_event_note: str | None = None
 
         self._started = False
 
@@ -233,12 +236,16 @@ class ROS2Connector:
         self._nav_active = True
         self._cancel_requested = False
         self._distance_remaining = None
+        self._recovery_count = 0
+        self._replan_count = 0
+        self._last_event_note = None
 
         try:
             self._navigator.goToPose(pose)
             logger.info("ROS2Connector: goToPose() returned, entering poll loop.")
 
             iteration = 0
+            close_enough_cycles = 0
             while True:
                 is_complete = self._navigator.isTaskComplete()
                 logger.info(
@@ -260,11 +267,30 @@ class ROS2Connector:
                         logger.info(
                             f"Nav2 distance_remaining={self._distance_remaining:.2f} m"
                         )
-                        # Temporary fix: isTaskComplete() misses the result callback
-                        # when Nav2 completes. Treat < 0.5 m as close enough to succeed.
                         if self._distance_remaining < 0.5:
+                            close_enough_cycles += 1
+                        else:
+                            close_enough_cycles = 0
+
+                        recoveries = getattr(feedback, "number_of_recoveries", None)
+                        if isinstance(recoveries, int) and recoveries > self._recovery_count:
+                            self._recovery_count = recoveries
+                            self._last_event_note = "I am taking a moment to recover around an obstacle."
                             logger.info(
-                                "ROS2Connector: distance < 0.5 m — treating as succeeded."
+                                "ROS2Connector: recovery detected (count=%s).", recoveries
+                            )
+
+                        replans = getattr(feedback, "number_of_replans", None)
+                        if isinstance(replans, int) and replans > self._replan_count:
+                            self._replan_count = replans
+                            self._last_event_note = "I am taking a slightly different route to stay safe."
+                            logger.info(
+                                "ROS2Connector: replan detected (count=%s).", replans
+                            )
+
+                        if close_enough_cycles >= 5:
+                            logger.info(
+                                "ROS2Connector: distance stayed below 0.5 m for 5 polls; using close-enough fallback."
                             )
                             return "succeeded"
                     except AttributeError:
@@ -330,6 +356,21 @@ class ROS2Connector:
     def distance_remaining(self) -> float | None:
         """Most recent distance-to-goal feedback from Nav2 (metres), or None."""
         return self._distance_remaining
+
+    @property
+    def recovery_count(self) -> int:
+        """Most recent Nav2 recovery count, if available."""
+        return self._recovery_count
+
+    @property
+    def replan_count(self) -> int:
+        """Most recent Nav2 replan count, if available."""
+        return self._replan_count
+
+    @property
+    def last_event_note(self) -> str | None:
+        """Last human-readable navigation event note, if any."""
+        return self._last_event_note
 
     # ------------------------------------------------------------------
     # Publish
