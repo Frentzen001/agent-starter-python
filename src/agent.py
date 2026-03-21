@@ -20,45 +20,27 @@ Coordinate frame
 
 import asyncio
 import logging
-import re
-import threading
-import time
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from dotenv import load_dotenv
-from playwright.async_api import async_playwright
+from knowledge import GARAGE_KNOWLEDGE
 
 # ---------------------------------------------------------------------------
-# ROS 2 optional imports — split so eye publisher works without Nav2
+# ROS 2 — eye expression publishing (std_msgs needed for message type)
 # ---------------------------------------------------------------------------
-
-# Core ROS 2 (rclpy + std_msgs) — needed for eye expression publishing
 try:
-    import rclpy
-    import rclpy.executors
-    from rclpy.node import Node
     from std_msgs.msg import Int32
 
     ROS2_AVAILABLE = True
 except ImportError:
+    Int32 = None  # type: ignore[assignment]
     ROS2_AVAILABLE = False
-    _log_tmp = logging.getLogger("agent")
-    _log_tmp.warning("rclpy not found — ROS 2 eye expression publishing disabled.")
-
-# Nav2 (nav2_simple_commander + geometry_msgs) — needed for navigation
-try:
-    from geometry_msgs.msg import PoseStamped
-    from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
-
-    NAV2_AVAILABLE = True
-except ImportError:
-    NAV2_AVAILABLE = False
-    _log_tmp2 = logging.getLogger("agent")
-    _log_tmp2.warning(
-        "nav2_simple_commander not found — robot navigation disabled. "
-        "Install it inside a sourced ROS 2 Humble workspace."
+    logging.getLogger("agent").warning(
+        "std_msgs not found — ROS 2 eye expression publishing disabled."
     )
+
+from ros2_connector import ROS2Connector
 
 from livekit import rtc
 from livekit.agents import (
@@ -76,6 +58,11 @@ from livekit.agents import (
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
 logger = logging.getLogger("agent")
 load_dotenv(".env.local")
 
@@ -108,168 +95,17 @@ class Waypoint(NamedTuple):
 
 TOUR_MANIFEST: dict[str, Waypoint] = {
     "Entrance": Waypoint(x=0.00, y=0.00, ow=1.000),
-    "3D Printing Station": Waypoint(x=2.50, y=1.00, ow=0.924),
-    "Electronics Lab": Waypoint(x=5.00, y=0.50, ow=0.924),
-    "Laser Cutting Area": Waypoint(x=5.00, y=-2.00, ow=0.707),
-    "Wood & Metal Workshop": Waypoint(x=2.50, y=-3.50, ow=0.000),
-    "Collaboration Hub": Waypoint(x=0.00, y=-3.00, ow=-0.707),
-    "Project Showcase Wall": Waypoint(x=-2.00, y=-1.50, ow=-0.924),
-    "Exit": Waypoint(x=-2.00, y=0.00, ow=-1.000),
+    "Fabrication Lab": Waypoint(x=1.14, y=1.15, ow=0.924),
+    "Machines Lab": Waypoint(x=1.20, y=-1.0, ow=0.924),
+    "Top 10 Office": Waypoint(x=-0.53, y=1.68, ow=0.707),
+    "Kirchoff's Pod": Waypoint(x=-0.53, y=-1.80, ow=0.000),
+    "Maxwell's Pod": Waypoint(x=-2.16, y=1.08, ow=-0.707),
+    "Project Showcase Wall": Waypoint(x=-2.30, y=-2.15, ow=-0.924),
+    "Exit": Waypoint(x=-0.47, y=-2.14, ow=-1.000),
 }
 
 # Ordered stop list used by start_tour / resume_tour
 TOUR_STOPS: list[str] = list(TOUR_MANIFEST.keys())
-
-
-# ---------------------------------------------------------------------------
-# Nav2Controller
-# ---------------------------------------------------------------------------
-class Nav2Controller:
-    """
-    Thin async-friendly wrapper around BasicNavigator.
-
-    All *_sync methods are intended to be called via asyncio.to_thread()
-    so the LiveKit event loop is never blocked.
-    """
-
-    def __init__(self) -> None:
-        if not rclpy.ok():
-            rclpy.init()
-
-        self._navigator = BasicNavigator()
-        self._executor = rclpy.executors.MultiThreadedExecutor()
-        self._executor.add_node(self._navigator)
-        self._spin_thread = threading.Thread(
-            target=self._executor.spin, daemon=True, name="nav2_executor"
-        )
-        self._spin_thread.start()
-
-        # Shared feedback state (written by nav thread, read by async tasks)
-        self._distance_remaining: float | None = None
-        self._nav_active: bool = False
-        self._cancel_requested: bool = False
-
-        logger.info("Nav2Controller: waiting for Nav2 to become active …")
-        self._navigator.waitUntilNav2Active()
-        logger.info("Nav2Controller: Nav2 is active.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _make_pose(self, x: float, y: float, ow: float) -> "PoseStamped":
-        """Build a PoseStamped in the map frame."""
-        # Derive oz from ow so the quaternion is normalised (pure yaw rotation)
-        import math
-
-        oz = math.sqrt(max(0.0, 1.0 - ow**2))
-        pose = PoseStamped()
-        pose.header.frame_id = "map"
-        pose.header.stamp = self._navigator.get_clock().now().to_msg()
-        pose.pose.position.x = float(x)
-        pose.pose.position.y = float(y)
-        pose.pose.position.z = 0.0
-        pose.pose.orientation.x = 0.0
-        pose.pose.orientation.y = 0.0
-        pose.pose.orientation.z = oz
-        pose.pose.orientation.w = float(ow)
-        return pose
-
-    # ------------------------------------------------------------------
-    # Blocking (sync) methods — call via asyncio.to_thread()
-    # ------------------------------------------------------------------
-    def go_to_pose_sync(
-        self,
-        x: float,
-        y: float,
-        ow: float,
-        poll_interval: float = 0.5,
-    ) -> str:
-        """
-        Send a navigation goal and block until it completes or is cancelled.
-        Returns 'succeeded', 'canceled', or 'failed'.
-        """
-        pose = self._make_pose(x, y, ow)
-        self._navigator.goToPose(pose)
-        self._nav_active = True
-        self._cancel_requested = False
-        self._distance_remaining = None
-
-        try:
-            while not self._navigator.isTaskComplete():
-                if self._cancel_requested:
-                    self._navigator.cancelTask()
-                    # Wait for Nav2 to acknowledge the cancel
-                    while not self._navigator.isTaskComplete():
-                        time.sleep(0.1)
-                    return "canceled"
-
-                feedback = self._navigator.getFeedback()
-                if feedback:
-                    self._distance_remaining = feedback.distance_remaining
-                    logger.debug(
-                        f"Nav2 distance_remaining={self._distance_remaining:.2f} m"
-                    )
-                time.sleep(poll_interval)
-        finally:
-            self._nav_active = False
-            self._distance_remaining = None
-
-        result = self._navigator.getResult()
-        if result == TaskResult.SUCCEEDED:
-            return "succeeded"
-        elif result == TaskResult.CANCELED:
-            return "canceled"
-        else:
-            return "failed"
-
-    def cancel_task_sync(self) -> None:
-        """Signal the navigation loop to cancel the current goal."""
-        if self._nav_active:
-            self._cancel_requested = True
-            logger.info("Nav2Controller: cancel requested.")
-        else:
-            logger.info("Nav2Controller: no active task to cancel.")
-
-    # ------------------------------------------------------------------
-    # Properties readable from any thread
-    # ------------------------------------------------------------------
-    @property
-    def distance_remaining(self) -> float | None:
-        return self._distance_remaining
-
-    @property
-    def is_navigating(self) -> bool:
-        return self._nav_active
-
-    # ------------------------------------------------------------------
-    def shutdown(self) -> None:
-        try:
-            self._executor.shutdown(wait=False)
-            self._navigator.destroy_node()
-        except Exception as exc:
-            logger.warning(f"Nav2Controller shutdown error: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# ROS 2 Eye Publisher
-# ---------------------------------------------------------------------------
-class ROS2EyePublisher:
-    """Publishes eye-expression integers to /eye_expression."""
-
-    def __init__(self, executor: "rclpy.executors.Executor") -> None:
-        self._node = Node("more_tea_eye")
-        self._pub = self._node.create_publisher(Int32, "/eye_expression", 10)
-        executor.add_node(self._node)
-        logger.info("ROS2EyePublisher: ready, publishing to /eye_expression")
-
-    def publish(self, value: int) -> None:
-        msg = Int32()
-        msg.data = value
-        self._pub.publish(msg)
-        logger.info(f"ROS2: published eye_expression={value}")
-
-    def shutdown(self) -> None:
-        self._node.destroy_node()
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +126,7 @@ class TourManager:
         True while a tour sequence is running.
     """
 
-    nav: Nav2Controller | None = None
+    nav: "ROS2Connector | None" = None
     current_stop_index: int = 0
     is_active: bool = False
     _nav_task: asyncio.Task | None = field(default=None, repr=False)
@@ -307,7 +143,7 @@ class TourManager:
             return f"Navigation unavailable (ROS 2 not loaded). Pretending to drive to {name}."
 
         logger.info(f"TourManager: navigating to {name} ({wp})")
-        result = await asyncio.to_thread(self.nav.go_to_pose_sync, wp.x, wp.y, wp.ow)
+        result = await self.nav.navigate_to_pose(wp.x, wp.y, wp.ow)
         return result
 
     # ------------------------------------------------------------------
@@ -343,7 +179,7 @@ class TourManager:
         self.is_active = False
         if self.nav is None:
             return "Navigation unavailable — tour paused conceptually."
-        await asyncio.to_thread(self.nav.cancel_task_sync)
+        await self.nav.cancel_navigation()
         return "Tour paused. The robot has stopped."
 
     async def resume_tour(self) -> str:
@@ -362,7 +198,7 @@ class TourManager:
         self.is_active = False
         if self.nav is None:
             return "Navigation unavailable — stop acknowledged."
-        await asyncio.to_thread(self.nav.cancel_task_sync)
+        await self.nav.cancel_navigation()
         return "Robot stopped immediately!"
 
     def get_distance_status(self) -> str:
@@ -413,41 +249,10 @@ class TourManager:
 
 
 # ---------------------------------------------------------------------------
-# Global ROS 2 singletons (initialised once at import time)
+# Global ROS 2 connector singleton — started lazily inside my_agent()
 # ---------------------------------------------------------------------------
-_nav_controller: Nav2Controller | None = None
-_eye_publisher: ROS2EyePublisher | None = None
+_ros2: ROS2Connector | None = ROS2Connector() if ROS2_AVAILABLE else None
 _tour_manager: TourManager = TourManager()
-
-if NAV2_AVAILABLE:
-    # Full stack: share one MultiThreadedExecutor between Nav2 and the eye node
-    try:
-        _nav_controller = Nav2Controller()
-        _eye_publisher = ROS2EyePublisher(_nav_controller._executor)
-        _tour_manager.nav = _nav_controller
-        logger.info("ROS 2 + Nav2 singletons initialised successfully.")
-    except Exception as exc:
-        logger.warning(f"Nav2Controller init failed: {exc}")
-
-if _eye_publisher is None and ROS2_AVAILABLE:
-    # rclpy available but nav2_simple_commander missing:
-    # spin a lightweight standalone executor just for the eye publisher.
-    try:
-        if not rclpy.ok():
-            rclpy.init()
-        _standalone_executor = rclpy.executors.MultiThreadedExecutor()
-        _ros2_eye_thread = threading.Thread(
-            target=_standalone_executor.spin,
-            daemon=True,
-            name="ros2_eye_executor",
-        )
-        _ros2_eye_thread.start()
-        _eye_publisher = ROS2EyePublisher(_standalone_executor)
-        logger.info(
-            "ROS 2 eye publisher initialised (standalone — Nav2 not available)."
-        )
-    except Exception as exc:
-        logger.warning(f"ROS 2 eye publisher init failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -481,13 +286,16 @@ BEHAVIOUR RULES:
    robot still needs to travel and relay that to the user (e.g. "We are almost there — just
    2 metres to go!").
 
-6. Garage info — for questions about facilities, equipment, events, opening hours or
-   anything else Garage-related, use lookup_garage_info to fetch live data from the website.
-
-7. Keep responses concise and conversational.  No markdown, no asterisks, no emojis in
+6. Keep responses concise and conversational.  No markdown, no asterisks, no emojis in
    speech — the output goes directly to text-to-speech.
 
 Coordinates are in the *map* frame.  You do not need to handle raw numbers; tools do that.
+
+--- GARAGE@EEE KNOWLEDGE BASE ---
+{GARAGE_KNOWLEDGE}
+--- END OF KNOWLEDGE BASE ---
+
+Use the knowledge base above to answer questions accurately. If something is not covered, say so honestly rather than guessing.
 """,
         )
 
@@ -506,8 +314,8 @@ Coordinates are in the *map* frame.  You do not need to handle raw numbers; tool
         emotion = emotion.lower().strip()
         value = EMOTION_MAP.get(emotion, 0)
         logger.info(f"Eye expression → {emotion} ({value})")
-        if _eye_publisher:
-            _eye_publisher.publish(value)
+        if _ros2 is not None:
+            _ros2.publish("/eye_expression", Int32, {"data": value})
         return f"Eye expression set to {emotion}."
 
     # ------------------------------------------------------------------
@@ -524,7 +332,13 @@ Coordinates are in the *map* frame.  You do not need to handle raw numbers; tool
             "Follow me — I'll lead the way!",
             allow_interruptions=True,
         )
-        return await _tour_manager.start_tour()
+        try:
+            result = await _tour_manager.start_tour()
+            logger.info(f"start_tour result: {result}")
+            return result
+        except Exception as exc:
+            logger.exception(f"start_tour raised an exception: {exc}")
+            return f"Navigation error: {type(exc).__name__}: {exc}"
 
     @function_tool()
     async def go_to_location(self, context: RunContext, location_name: str) -> str:
@@ -588,42 +402,6 @@ Coordinates are in the *map* frame.  You do not need to handle raw numbers; tool
         """
         return _tour_manager.get_distance_status()
 
-    # ------------------------------------------------------------------
-    # Garage info lookup (web scrape)
-    # ------------------------------------------------------------------
-    @function_tool()
-    async def lookup_garage_info(self, context: RunContext, query: str) -> str:
-        """Fetch live information about Garage@EEE from its official website.
-
-        Use this for any question about facilities, equipment, events, opening hours,
-        workshops, membership, or anything else makerspace-related.
-
-        Args:
-            query: The topic or question to look up.
-        """
-        logger.info(f"Garage info lookup: {query!r}")
-        await context.session.say(
-            "Let me check the Garage website for you — just a moment!",
-            allow_interruptions=False,
-        )
-        try:
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.goto(
-                    "https://garage-eee.com/",
-                    wait_until="networkidle",
-                    timeout=20_000,
-                )
-                text = await page.inner_text("body")
-                text = re.sub(r"\s+", " ", text).strip()
-                await browser.close()
-            logger.info(f"Scraped garage-eee.com: {len(text)} chars")
-            return text[:6000]
-        except Exception as exc:
-            logger.error(f"Garage fetch error: {exc}", exc_info=True)
-            return f"Error fetching Garage info: {type(exc).__name__}: {exc}"
-
 
 # ---------------------------------------------------------------------------
 # LiveKit server wiring
@@ -641,6 +419,11 @@ server.setup_fnc = prewarm
 @server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext) -> None:
     ctx.log_context_fields = {"room": ctx.room.name}
+
+    # Start the ROS 2 connector once the asyncio loop is live
+    if _ros2 is not None and not _ros2._started:
+        _ros2.start(asyncio.get_event_loop())
+        _tour_manager.nav = _ros2
 
     session = AgentSession(
         # STT — Deepgram Nova 3 with multilingual support

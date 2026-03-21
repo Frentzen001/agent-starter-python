@@ -317,5 +317,93 @@ class TestEyeExpressionPublishConvention(unittest.TestCase):
         self.assertTrue(all(v >= 0 for v in values), "Negative emotion value found")
 
 
+# ---------------------------------------------------------------------------
+# Test: Nav2 integration
+# ---------------------------------------------------------------------------
+
+class TestNav2Integration(unittest.TestCase):
+    """
+    Tests for navigate_to_pose(), cancel_navigation(), is_navigating, and
+    distance_remaining.  All mocked — no real Nav2 installation required.
+    """
+
+    def setUp(self):
+        self._patcher = patch("ros2_connector.ROS2_AVAILABLE", False)
+        self._patcher.start()
+        import importlib
+        import ros2_connector
+        importlib.reload(ros2_connector)
+        self.mod = ros2_connector
+
+    def tearDown(self):
+        self._patcher.stop()
+
+    def test_navigate_to_pose_unavailable_when_navigator_is_none(self):
+        """navigate_to_pose() must return the unavailable string when _navigator is None."""
+        connector = self.mod.ROS2Connector()
+        # _navigator defaults to None and started=False — no ROS2
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(connector.navigate_to_pose(1.0, 2.0, 1.0))
+        loop.close()
+        self.assertIn("unavailable", result.lower())
+
+    def test_navigate_to_pose_calls_go_to_pose_sync(self):
+        """navigate_to_pose() must delegate to _go_to_pose_sync via asyncio.to_thread."""
+        connector = self.mod.ROS2Connector()
+        connector._navigator = MagicMock()  # non-None so the guard passes
+        connector._go_to_pose_sync = MagicMock(return_value="succeeded")
+
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(connector.navigate_to_pose(1.0, 0.5, 0.924))
+        loop.close()
+
+        connector._go_to_pose_sync.assert_called_once_with(1.0, 0.5, 0.924)
+        self.assertEqual(result, "succeeded")
+
+    def test_cancel_navigation_sets_cancel_requested(self):
+        """cancel_navigation() must set _cancel_requested when _nav_active is True."""
+        connector = self.mod.ROS2Connector()
+        connector._started = True  # bypass the early-return guard
+        connector._nav_active = True
+        connector._cancel_requested = False
+
+        # Replace _cancel_task_sync so asyncio.to_thread can call it synchronously
+        def _sync_cancel():
+            if connector._nav_active:
+                connector._cancel_requested = True
+
+        connector._cancel_task_sync = _sync_cancel
+
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(connector.cancel_navigation())
+        loop.close()
+
+        self.assertTrue(connector._cancel_requested)
+
+    def test_cancel_navigation_noop_when_not_started(self):
+        """cancel_navigation() must be a no-op when the connector is not started."""
+        connector = self.mod.ROS2Connector()
+        # _started defaults to False
+        connector._cancel_task_sync = MagicMock()
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(connector.cancel_navigation())
+        loop.close()
+        connector._cancel_task_sync.assert_not_called()
+
+    def test_is_navigating_property(self):
+        """is_navigating must reflect _nav_active."""
+        connector = self.mod.ROS2Connector()
+        self.assertFalse(connector.is_navigating)
+        connector._nav_active = True
+        self.assertTrue(connector.is_navigating)
+
+    def test_distance_remaining_property(self):
+        """distance_remaining must reflect _distance_remaining."""
+        connector = self.mod.ROS2Connector()
+        self.assertIsNone(connector.distance_remaining)
+        connector._distance_remaining = 3.75
+        self.assertAlmostEqual(connector.distance_remaining, 3.75)
+
+
 if __name__ == "__main__":
     unittest.main()

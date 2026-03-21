@@ -193,13 +193,114 @@ Get started quickly with our pre-built frontend starter apps, or add telephony s
 
 For advanced customization, see the [complete frontend guide](https://docs.livekit.io/agents/start/frontend/).
 
-## Tests and evals
+## Testing
 
-This project includes a complete suite of evals, based on the LiveKit Agents [testing & evaluation framework](https://docs.livekit.io/agents/build/testing/). To run them, use `pytest`.
+This project has two test levels for the ROS 2 connector, plus the LiveKit agent evals.
 
-```console
-uv run pytest
+---
+
+### Level 1 — Mocked unit tests (no ROS 2 needed)
+
+Runs on any machine. All rclpy/Nav2 imports are patched out with `unittest.mock`.
+
+```bash
+PYTHONPATH=src uv run pytest tests/test_ros2_connector.py -v
 ```
+
+**What is verified:**
+- `publish()` is a no-op and never raises when ROS 2 is unavailable
+- `publish()` enqueues exactly one item per call
+- `_drain_publish_queue()` creates a publisher lazily and calls `publisher.publish()` with the correct message
+- `subscribe()` returns an `asyncio.Queue` and is idempotent (same topic → same queue)
+- `shutdown()` is safe to call multiple times without errors
+- `set_eye_expression` emotion → integer mapping, topic name, data dict format
+- Nav2 `navigate_to_pose()` returns the "unavailable" string when `_navigator is None`
+- `cancel_navigation()` sets `_cancel_requested` correctly
+- `is_navigating` and `distance_remaining` properties reflect internal state
+
+---
+
+### Level 2 — Real rclpy integration tests (ROS 2 must be sourced)
+
+Uses a real `rclpy` node — no mocking. Verifies the actual thread-safe bridge path
+from `publish()` → drain timer → DDS → subscriber callback → `asyncio.Queue`.
+
+**Prerequisites:**
+```bash
+source /opt/ros/humble/setup.bash   # or your ROS 2 distro
+```
+
+**Run:**
+```bash
+source /opt/ros/humble/setup.bash && \
+PYTEST_ADDOPTS="-p no:launch_ros -p no:launch_testing" \
+PYTHONPATH=src:/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages \
+uv run pytest tests/test_ros2_connector_level2.py -v
+```
+
+> **Why `PYTEST_ADDOPTS`?**
+> ROS 2 Humble ships its own pytest plugins (`launch_testing`, `launch_ros`) that are
+> registered as setuptools entry points. One of them (`launch_testing_ros`) depends on
+> `lark` and crashes pytest during collection. Setting `PYTEST_ADDOPTS` before pytest
+> starts suppresses them before entry points are loaded — `pyproject.toml`'s `addopts`
+> is processed too late.
+
+> **Why the explicit `PYTHONPATH`?**
+> `uv run` creates an isolated venv that does not inherit the `PYTHONPATH` set by
+> `setup.bash`. You must append the ROS 2 site-packages explicitly so that `rclpy` and
+> `std_msgs` are importable inside the venv's Python.
+
+**What is verified (with real rclpy):**
+- The drain timer actually fires and calls `publisher.publish()` on a real `rclpy` publisher
+- 10 messages queued → all drained in under 300 ms, no hang
+- Different topics create distinct `rclpy` publisher objects
+- Full pub/sub loopback: `Int32` published with `{"data": 42}` arrives in the `asyncio.Queue` with `msg.data == 42`
+- 3 sequential messages arrive in publish order
+- `subscribe()` idempotency holds on a live node
+- `repr()`, `_started` flag, and `shutdown()` behave correctly with a real `rclpy` context
+
+---
+
+### Level 3 — Live robot smoke test (Nav2 + real hardware)
+
+No automated test exists for this level. Run manually after deploying to the robot:
+
+```bash
+# Terminal 1 — start the agent
+uv run src/agent.py dev
+
+# Terminal 2 — watch eye expression topic
+source /opt/ros/humble/setup.bash
+ros2 topic echo /eye_expression std_msgs/msg/Int32
+
+# Terminal 3 — watch nav2 (if Nav2 is running)
+ros2 topic echo /navigate_to_pose/status action_msgs/msg/GoalStatusArray
+```
+
+Say "start the tour" to the agent and verify the robot starts moving.
+
+---
+
+### Agent behaviour evals (LiveKit)
+
+Tests the LLM-facing behaviour of the agent (grounding, friendliness, tool use):
+
+```bash
+PYTHONPATH=src uv run pytest tests/test_agent.py -v
+```
+
+Requires `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` in `.env.local`.
+
+---
+
+### Quick reference
+
+| Command | What it tests | Needs ROS 2? |
+|---|---|---|
+| `PYTHONPATH=src uv run pytest tests/test_ros2_connector.py -v` | ROS 2 connector logic (mocked) | No |
+| *(see Level 2 command above)* | Real rclpy pub/sub bridge | Yes (sourced) |
+| `PYTHONPATH=src uv run pytest tests/test_agent.py -v` | LiveKit agent evals | No (uses LiveKit Cloud) |
+| `PYTHONPATH=src uv run pytest -v` | All of the above | No |
 
 ## Using this template repo for your own project
 

@@ -52,6 +52,21 @@ tasks:
     desc: "Bootstrap application for local development"
     cmds:
       - "uv sync"
+
+  test:
+    desc: "Level 1 — fully mocked unit tests (no ROS2 needed)"
+    cmds:
+      - "PYTHONPATH=src uv run pytest tests/test_ros2_connector.py {{.CLI_ARGS}} -v"
+
+  test-ros2:
+    desc: "Level 2 — real rclpy integration tests (requires ROS2 sourced)"
+    cmds:
+      - |
+        source /opt/ros/humble/setup.bash && \
+        PYTEST_ADDOPTS="-p no:launch_ros -p no:launch_testing" \
+        PYTHONPATH=src:/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages \
+        uv run pytest tests/test_ros2_connector_level2.py {{.CLI_ARGS}} -v
+
   dev:
     interactive: true
     cmds:

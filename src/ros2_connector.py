@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import queue
 import threading
 from typing import TYPE_CHECKING, Any
@@ -57,6 +58,18 @@ try:
 except ImportError:
     ROS2_AVAILABLE = False
     logger.warning("rclpy not found — ROS2Connector will run in no-op mode.")
+
+# ---------------------------------------------------------------------------
+# Optional Nav2 import guard
+# ---------------------------------------------------------------------------
+try:
+    from geometry_msgs.msg import PoseStamped
+    from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
+
+    NAV2_AVAILABLE = True
+except ImportError:
+    NAV2_AVAILABLE = False
+    logger.warning("nav2_simple_commander not found — navigation disabled.")
 
 if TYPE_CHECKING:
     # Only used for type hints; never imported at runtime when ROS2 is absent
@@ -97,6 +110,12 @@ class ROS2Connector:
 
         # topic → asyncio.Queue for incoming messages
         self._sub_queues: dict[str, asyncio.Queue] = {}
+
+        # Nav2 state
+        self._navigator: Any = None  # BasicNavigator instance
+        self._nav_active: bool = False
+        self._cancel_requested: bool = False
+        self._distance_remaining: float | None = None
 
         self._started = False
 
@@ -143,13 +162,25 @@ class ROS2Connector:
         self._started = True
         logger.info("ROS2Connector started (node=livekit_connector).")
 
+        # Initialise Nav2 if available — shares the same executor/spin thread
+        if NAV2_AVAILABLE:
+            try:
+                self._init_nav2()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"ROS2Connector: Nav2 init failed: {exc}")
+
     def shutdown(self) -> None:
-        """Stop the executor and destroy the node."""
+        """Stop the executor and destroy all nodes."""
         if not self._started:
             return
         try:
             if self._executor:
-                self._executor.shutdown(wait=False)
+                try:
+                    self._executor.shutdown(wait=False)  # rclpy >= Jazzy
+                except TypeError:
+                    self._executor.shutdown()  # Humble: no 'wait' kwarg
+            if self._navigator:
+                self._navigator.destroy_node()
             if self._node:
                 self._node.destroy_node()
         except Exception as exc:  # noqa: BLE001
@@ -157,6 +188,148 @@ class ROS2Connector:
         finally:
             self._started = False
             logger.info("ROS2Connector shut down.")
+
+    # ------------------------------------------------------------------
+    # Nav2
+    # ------------------------------------------------------------------
+
+    def _init_nav2(self) -> None:
+        """Instantiate BasicNavigator and wait until Nav2 is fully active."""
+        self._navigator = BasicNavigator()
+        logger.info("ROS2Connector: waiting for Nav2 to become active …")
+        try:
+            self._navigator.waitUntilNav2Active()
+            logger.info("ROS2Connector: Nav2 is active — navigator ready.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"ROS2Connector: waitUntilNav2Active() failed: {exc}")
+            try:
+                self._navigator.destroy_node()
+            except Exception:  # noqa: BLE001
+                pass
+            self._navigator = None
+
+    def _make_pose(self, x: float, y: float, ow: float) -> Any:
+        """Build a PoseStamped in the map frame (pure yaw rotation)."""
+        oz = math.sqrt(max(0.0, 1.0 - ow ** 2))
+        pose = PoseStamped()
+        pose.header.frame_id = "map"
+        pose.header.stamp = self._navigator.get_clock().now().to_msg()
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        pose.pose.position.z = 0.0
+        pose.pose.orientation.x = 0.0
+        pose.pose.orientation.y = 0.0
+        pose.pose.orientation.z = oz
+        pose.pose.orientation.w = float(ow)
+        return pose
+
+    def _go_to_pose_sync(self, x: float, y: float, ow: float) -> str:
+        """
+        Blocking Nav2 navigation — call only via asyncio.to_thread().
+        Returns 'succeeded', 'canceled', or 'failed'.
+        """
+        pose = self._make_pose(x, y, ow)
+
+        self._nav_active = True
+        self._cancel_requested = False
+        self._distance_remaining = None
+
+        try:
+            self._navigator.goToPose(pose)
+            logger.info("ROS2Connector: goToPose() returned, entering poll loop.")
+
+            iteration = 0
+            while True:
+                is_complete = self._navigator.isTaskComplete()
+                logger.info(
+                    f"ROS2Connector: poll iteration={iteration} isTaskComplete={is_complete}"
+                )
+                if is_complete:
+                    logger.info("ROS2Connector: isTaskComplete() returned True — exiting loop.")
+                    break
+                iteration += 1
+
+                if self._cancel_requested:
+                    self._navigator.cancelTask()
+                    return "canceled"
+
+                feedback = self._navigator.getFeedback()
+                if feedback is not None:
+                    try:
+                        self._distance_remaining = feedback.distance_remaining
+                        logger.info(
+                            f"Nav2 distance_remaining={self._distance_remaining:.2f} m"
+                        )
+                        # Temporary fix: isTaskComplete() misses the result callback
+                        # when Nav2 completes. Treat < 0.5 m as close enough to succeed.
+                        if self._distance_remaining < 0.5:
+                            logger.info(
+                                "ROS2Connector: distance < 0.5 m — treating as succeeded."
+                            )
+                            return "succeeded"
+                    except AttributeError:
+                        logger.warning("Nav2 feedback has no distance_remaining attribute.")
+
+        finally:
+            self._nav_active = False
+            self._distance_remaining = None
+
+        result = self._navigator.getResult()
+        if result == TaskResult.SUCCEEDED:
+            logger.info("ROS2Connector: goal succeeded.")
+            return "succeeded"
+        elif result == TaskResult.CANCELED:
+            logger.info("ROS2Connector: goal canceled.")
+            return "canceled"
+        else:
+            logger.warning("ROS2Connector: goal failed.")
+            return "failed"
+
+    def _cancel_task_sync(self) -> None:
+        """Signal the navigation poll loop to cancel. Call via asyncio.to_thread()."""
+        if self._nav_active:
+            self._cancel_requested = True
+            logger.info("ROS2Connector: cancel requested.")
+        else:
+            logger.info("ROS2Connector: no active navigation task to cancel.")
+
+    async def navigate_to_pose(self, x: float, y: float, ow: float) -> str:
+        """
+        Async Nav2 navigation.  Non-blocking to the asyncio event loop.
+
+        Parameters
+        ----------
+        x, y:
+            Target position in the map frame (metres).
+        ow:
+            Quaternion w component for the desired heading.
+
+        Returns
+        -------
+        str
+            ``'succeeded'``, ``'canceled'``, or ``'failed'``.
+            Returns ``'Navigation unavailable (Nav2 not loaded).'`` when Nav2
+            is not present.
+        """
+        if self._navigator is None:
+            return "Navigation unavailable (Nav2 not loaded)."
+        return await asyncio.to_thread(self._go_to_pose_sync, x, y, ow)
+
+    async def cancel_navigation(self) -> None:
+        """Signal any active Nav2 goal to cancel. Safe to call at any time."""
+        if not self._started:
+            return
+        await asyncio.to_thread(self._cancel_task_sync)
+
+    @property
+    def is_navigating(self) -> bool:
+        """True while a Nav2 goal is in progress."""
+        return self._nav_active
+
+    @property
+    def distance_remaining(self) -> float | None:
+        """Most recent distance-to-goal feedback from Nav2 (metres), or None."""
+        return self._distance_remaining
 
     # ------------------------------------------------------------------
     # Publish
