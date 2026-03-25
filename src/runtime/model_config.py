@@ -20,11 +20,23 @@ def _env_value(env: Mapping[str, str], name: str, *, default: str) -> str:
     return stripped or default
 
 
+def _env_optional_value(env: Mapping[str, str], name: str) -> str | None:
+    value = env.get(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 @dataclass(frozen=True)
 class HostedModelConfig:
     stt_model: str = 'deepgram/nova-3'
     stt_language: str = 'multi'
     llm_model: str = 'openai/gpt-4o'
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    llm_agent_id: str | None = None
+    llm_health_url: str | None = None
     tts_model: str = 'cartesia/sonic-3'
     tts_voice: str = '9626c31c-bec5-4cca-baa8-f8ba9e84c8bc'
 
@@ -63,7 +75,8 @@ class ModelStackConfig:
     def from_env(cls, env: Mapping[str, str]) -> 'ModelStackConfig':
         local_llm_base_url = _env_value(env, 'LOCAL_LLM_BASE_URL', default='http://127.0.0.1:11434/v1')
         local_stt_base_url = _env_value(env, 'LOCAL_STT_BASE_URL', default='http://127.0.0.1:8000/v1')
-        local_tts_base_url = _env_value(env, 'LOCAL_TTS_BASE_URL', default='http://127.0.0.1:8880/v1')
+        local_tts_base_url = _env_value(env, 'LOCAL_TTS_BASE_URL', default='http://127.0.0.1:8000/v1')
+        hosted_llm_base_url = _env_optional_value(env, 'HOSTED_LLM_BASE_URL')
 
         return cls(
             use_local_models=_env_flag(env, 'USE_LOCAL_MODELS', default=False),
@@ -112,6 +125,10 @@ class ModelStackConfig:
                 stt_model=_env_value(env, 'HOSTED_STT_MODEL', default='deepgram/nova-3'),
                 stt_language=_env_value(env, 'HOSTED_STT_LANGUAGE', default='multi'),
                 llm_model=_env_value(env, 'HOSTED_LLM_MODEL', default='openai/gpt-4o'),
+                llm_base_url=hosted_llm_base_url,
+                llm_api_key=_env_optional_value(env, 'HOSTED_LLM_API_KEY'),
+                llm_agent_id=_env_optional_value(env, 'HOSTED_LLM_AGENT_ID'),
+                llm_health_url=_env_optional_value(env, 'HOSTED_LLM_HEALTH_URL'),
                 tts_model=_env_value(env, 'HOSTED_TTS_MODEL', default='cartesia/sonic-3'),
                 tts_voice=_env_value(
                     env,
@@ -122,7 +139,11 @@ class ModelStackConfig:
         )
 
     def mode_label(self) -> str:
-        return 'local' if self.use_local_models else 'hosted'
+        if self.use_local_models:
+            return 'local'
+        if self.hosted.llm_base_url:
+            return 'hybrid'
+        return 'hosted'
 
 
 

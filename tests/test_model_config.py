@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 
 import pytest
 
@@ -57,7 +59,7 @@ def test_model_stack_config_uses_local_defaults_when_enabled() -> None:
     assert config.local.llm.base_url == 'http://127.0.0.1:11434/v1'
     assert config.local.llm.health_url == 'http://127.0.0.1:11434/api/tags'
     assert config.local.stt.health_url == 'http://127.0.0.1:8000/models'
-    assert config.local.tts.health_url == 'http://127.0.0.1:8880/models'
+    assert config.local.tts.health_url == 'http://127.0.0.1:8000/models'
 
 
 def test_startup_health_includes_local_model_checks_when_enabled(tmp_path: Path) -> None:
@@ -122,3 +124,69 @@ async def test_resolve_model_stack_raises_when_fallback_disabled(monkeypatch) ->
 
     with pytest.raises(RuntimeError, match='tts down'):
         await runtime._resolve_model_stack()
+
+
+def test_model_stack_config_supports_hosted_llm_override() -> None:
+    config = ModelStackConfig.from_env({
+        'HOSTED_LLM_BASE_URL': 'http://192.168.50.178:18789/v1',
+        'HOSTED_LLM_MODEL': 'openclaw',
+        'HOSTED_LLM_API_KEY': 'token',
+        'HOSTED_LLM_AGENT_ID': 'main',
+    })
+
+    assert config.use_local_models is False
+    assert config.hosted.llm_base_url == 'http://192.168.50.178:18789/v1'
+    assert config.hosted.llm_model == 'openclaw'
+    assert config.hosted.llm_agent_id == 'main'
+    assert config.mode_label() == 'hybrid'
+
+
+def test_startup_health_includes_hosted_llm_override_checks(tmp_path: Path) -> None:
+    _write_content(tmp_path)
+    report = SessionRuntime.inspect_startup_health(
+        content_dir=tmp_path,
+        env={
+            'LIVEKIT_URL': 'wss://example.test',
+            'LIVEKIT_API_KEY': 'key',
+            'LIVEKIT_API_SECRET': 'secret',
+            'HOSTED_LLM_BASE_URL': 'http://192.168.50.178:18789/v1',
+            'HOSTED_LLM_MODEL': 'openclaw',
+        },
+        require_livekit_env=True,
+    )
+
+    assert any(check.name == 'hosted_llm_base_url' and check.ok for check in report.checks)
+    assert any(check.name == 'hosted_llm_model' and check.ok for check in report.checks)
+
+
+def test_build_hosted_model_stack_uses_openclaw_llm_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = SessionRuntime(
+        always_awake=True,
+        require_livekit_env=False,
+        env={
+            'LIVEKIT_URL': 'wss://example.test',
+            'LIVEKIT_API_KEY': 'key',
+            'LIVEKIT_API_SECRET': 'secret',
+            'HOSTED_LLM_BASE_URL': 'http://192.168.50.178:18789/v1',
+            'HOSTED_LLM_MODEL': 'openclaw',
+            'HOSTED_LLM_API_KEY': 'token',
+            'HOSTED_LLM_AGENT_ID': 'main',
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_openai = types.SimpleNamespace(LLM=FakeLLM)
+    monkeypatch.setitem(sys.modules, 'livekit.plugins.openai', fake_openai)
+
+    stack = runtime._build_hosted_model_stack()
+
+    assert stack.source == 'hybrid'
+    assert captured['base_url'] == 'http://192.168.50.178:18789/v1'
+    assert captured['model'] == 'openclaw'
+    assert captured['api_key'] == 'token'
+    assert captured['extra_headers'] == {'x-openclaw-agent-id': 'main'}

@@ -26,7 +26,7 @@ from services.knowledge_service import KnowledgeService
 from services.memory_service import MemoryService
 from services.navigation_service import NavigationService
 from services.telemetry_service import TelemetryService
-from runtime.model_config import ModelStackConfig
+from runtime.model_config import HostedModelConfig, ModelStackConfig
 
 if TYPE_CHECKING:
     from agent.concierge_agent import ConciergeAgent
@@ -218,6 +218,22 @@ class SessionRuntime:
                 ]
             )
 
+        if model_stack_config.hosted.llm_base_url:
+            checks.extend(
+                [
+                    StartupCheck(
+                        'hosted_llm_base_url',
+                        cls._is_valid_http_url(model_stack_config.hosted.llm_base_url),
+                        model_stack_config.hosted.llm_base_url,
+                    ),
+                    StartupCheck(
+                        'hosted_llm_model',
+                        bool(model_stack_config.hosted.llm_model),
+                        model_stack_config.hosted.llm_model,
+                    ),
+                ]
+            )
+
         try:
             KnowledgeService(content_dir=resolved_content_dir)
             checks.append(StartupCheck('content_files', True, 'Persona, policy, and FAQ content loaded.'))
@@ -249,8 +265,34 @@ class SessionRuntime:
         return StartupHealthReport(tuple(checks), navigation_ready=ROS2_AVAILABLE and NAV2_AVAILABLE)
 
     @classmethod
+    def _shared_tour_stops_candidates(cls, content_dir: Path) -> tuple[Path, ...]:
+        configured = os.getenv('MORETEA_SHARED_TOUR_STOPS_PATH')
+        candidates: list[Path] = []
+        if configured:
+            candidates.append(Path(configured))
+        repo_default = content_dir.parents[2] / 'moretea-robot-mcp' / 'config' / 'tour_stops.yaml'
+        candidates.append(repo_default)
+        return tuple(candidates)
+
+    @classmethod
+    def _resolve_tour_stops_path(cls, content_dir: Path) -> Path:
+        local_path = content_dir / 'tour_stops.yaml'
+        configured = os.getenv('MORETEA_SHARED_TOUR_STOPS_PATH')
+        if configured:
+            configured_path = Path(configured)
+            if configured_path.exists():
+                return configured_path
+            raise ValueError(f"MORETEA_SHARED_TOUR_STOPS_PATH does not exist: {configured_path}")
+
+        repo_default = content_dir.parents[2] / 'moretea-robot-mcp' / 'config' / 'tour_stops.yaml'
+        is_default_content_dir = content_dir.name == 'content' and content_dir.parent.name == 'src'
+        if is_default_content_dir and repo_default.exists():
+            return repo_default
+        return local_path
+
+    @classmethod
     def _load_stops_from_content_dir(cls, content_dir: Path) -> tuple[TourStop, ...]:
-        path = content_dir / 'tour_stops.yaml'
+        path = cls._resolve_tour_stops_path(content_dir)
         with path.open('r', encoding='utf-8') as fh:
             raw = yaml.safe_load(fh) or {}
         if not isinstance(raw, dict):
@@ -384,6 +426,17 @@ class SessionRuntime:
         livekit_url = self.env.get('LIVEKIT_URL', '')
         livekit_api_key = self.env.get('LIVEKIT_API_KEY', '')
         livekit_api_secret = self.env.get('LIVEKIT_API_SECRET', '')
+        llm = (
+            self._build_hosted_llm_override(hosted)
+            if hosted.llm_base_url
+            else inference.LLM(
+                model=hosted.llm_model,
+                base_url=livekit_url,
+                api_key=livekit_api_key,
+                api_secret=livekit_api_secret,
+            )
+        )
+        source = 'hybrid' if hosted.llm_base_url else 'hosted'
         return ResolvedModelStack(
             stt=inference.STT(
                 model=hosted.stt_model,
@@ -392,12 +445,7 @@ class SessionRuntime:
                 api_key=livekit_api_key,
                 api_secret=livekit_api_secret,
             ),
-            llm=inference.LLM(
-                model=hosted.llm_model,
-                base_url=livekit_url,
-                api_key=livekit_api_key,
-                api_secret=livekit_api_secret,
-            ),
+            llm=llm,
             tts=inference.TTS(
                 model=hosted.tts_model,
                 voice=hosted.tts_voice,
@@ -405,10 +453,27 @@ class SessionRuntime:
                 api_key=livekit_api_key,
                 api_secret=livekit_api_secret,
             ),
-            source='hosted',
+            source=source,
             fallback_used=fallback_used,
             fallback_reason=fallback_reason,
         )
+
+    def _build_hosted_llm_override(self, hosted: HostedModelConfig) -> Any:
+        try:
+            from livekit.plugins import openai
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                'OpenClaw LLM override requires the OpenAI LiveKit plugin. Run uv sync after updating dependencies.'
+            ) from exc
+
+        kwargs: dict[str, Any] = {
+            'model': hosted.llm_model,
+            'api_key': hosted.llm_api_key or 'openclaw',
+            'base_url': hosted.llm_base_url,
+        }
+        if hosted.llm_agent_id:
+            kwargs['extra_headers'] = {'x-openclaw-agent-id': hosted.llm_agent_id}
+        return openai.LLM(**kwargs)
 
     def _build_local_model_stack(self) -> ResolvedModelStack:
         try:
