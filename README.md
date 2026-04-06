@@ -60,6 +60,13 @@ Required environment:
 - `LIVEKIT_API_KEY`
 - `LIVEKIT_API_SECRET`
 
+Start from the template:
+
+```bash
+cd /home/frentzen/FYP/agent-starter-python
+cp .env.example .env.local
+```
+
 ## Preferred Development Launch
 
 The preferred development launcher is tmuxinator.
@@ -172,7 +179,34 @@ MORETEA_OPENCLAW_AGENT_ID=main
 MORETEA_WAKE_KEYWORDS=moretea,more tea,hey moretea,hey more tea
 MORETEA_SLEEP_PROMPT=Say 'Hey MoreTea' to wake me up.
 MORETEA_SLEEP_PROMPT_COOLDOWN_SEC=8
+MORETEA_THINKING_CUE_ENABLED=1
+MORETEA_THINKING_CUE_VOLUME=0.35
 ```
+
+### Thinking Cue
+
+The barebone OpenClaw bridge now plays a short nonverbal chirp whenever a user turn passes the attention gate and is forwarded to OpenClaw.
+
+- It plays for accepted turns only.
+- It does not speak transcript text or alter the chat context.
+- It does not play for ignored ambient speech or sleep prompts.
+
+Current controls:
+
+- `MORETEA_THINKING_CUE_ENABLED=1`
+- `MORETEA_THINKING_CUE_VOLUME=0.35`
+
+Current behavior:
+
+- the cue now plays through the local machine speaker in console/dev runs
+- it does not require joining a LiveKit room
+- if local audio output is unavailable, the worker logs the cue failure and continues normally
+
+Local verification:
+
+- run `./scripts/run_openclaw_barebone.sh`
+- speak one accepted turn such as `Where is the printer?`
+- confirm you hear the short chirp on the host running the barebone worker
 
 ## Local Model Setup
 

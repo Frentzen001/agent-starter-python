@@ -22,6 +22,7 @@ dependencies = [
     { name = "playwright" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "sounddevice" },
     { name = "tavily-python" },
 ]
 
@@ -44,6 +45,7 @@ requires-dist = [
     { name = "playwright", specifier = ">=1.58.0" },
     { name = "python-dotenv" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "sounddevice", specifier = ">=0.5.5" },
     { name = "tavily-python", specifier = ">=0.7.21" },
 ]
 

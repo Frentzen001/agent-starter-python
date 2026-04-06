@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import math
 import os
 import re
+import struct
 import time
+
+import httpx
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -13,12 +19,30 @@ try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
     load_dotenv = None
+try:
+    import sounddevice
 
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, cli, inference, llm
+    SOUNDDEVICE_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    sounddevice = None  # type: ignore[assignment]
+    SOUNDDEVICE_AVAILABLE = False
+
+from livekit.agents import (
+    Agent,
+    AgentServer,
+    AgentSession,
+    JobContext,
+    JobProcess,
+    cli,
+    inference,
+    llm,
+)
 from livekit.plugins import openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from runtime.model_config import ModelStackConfig
+
+logger = logging.getLogger(__name__)
 
 
 class AttentionState(str, Enum):
@@ -43,6 +67,98 @@ class AttentionDecision:
 class AmbientUtterance:
     text: str
     created_at: float
+
+
+class ThinkingCue:
+    async def play_start(self) -> None:
+        raise NotImplementedError
+
+
+class NullThinkingCue(ThinkingCue):
+    async def play_start(self) -> None:
+        return
+
+
+class LocalThinkingCue(ThinkingCue):
+    _SAMPLE_RATE = 48_000
+    _ATTACK_SEC = 0.01
+    _RELEASE_SEC = 0.04
+    _DURATION_SEC = 0.18
+    _AMPLITUDE = 14_000
+    _FREQ_SEGMENTS = (
+        (0.09, 880.0),
+        (0.09, 1320.0),
+    )
+
+    def __init__(self, *, enabled: bool, volume: float) -> None:
+        self._enabled = enabled
+        self._volume = max(0.0, min(volume, 1.0))
+        self._cue_samples = self._build_cue_samples()
+        self._play_task: asyncio.Task[None] | None = None
+
+    async def play_start(self) -> None:
+        if not self._enabled:
+            return
+        if not SOUNDDEVICE_AVAILABLE:
+            logger.warning('Thinking cue unavailable: sounddevice is not installed in this runtime.')
+            return
+        if self._play_task is not None and not self._play_task.done():
+            return
+        loop = asyncio.get_running_loop()
+        self._play_task = loop.create_task(self._play_once())
+        self._play_task.add_done_callback(self._log_playback_failure)
+
+    async def _play_once(self) -> None:
+        await asyncio.to_thread(self._play_blocking)
+
+    def _play_blocking(self) -> None:
+        if sounddevice is None:  # pragma: no cover - guarded by SOUNDDEVICE_AVAILABLE
+            return
+        pcm = struct.unpack(f'<{len(self._cue_samples) // 2}h', self._cue_samples)
+        normalized = [(sample / 32768.0) * self._volume for sample in pcm]
+        sounddevice.play(normalized, samplerate=self._SAMPLE_RATE, blocking=False)
+
+    @staticmethod
+    def _log_playback_failure(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except Exception:  # pragma: no cover - playback backend errors are environment-specific
+            logger.exception('Failed to play local thinking cue.')
+
+    @classmethod
+    def _build_cue_samples(cls) -> bytes:
+        total_samples = int(cls._SAMPLE_RATE * cls._DURATION_SEC)
+        segment_edges: list[tuple[int, float]] = []
+        consumed = 0
+        for duration_sec, frequency_hz in cls._FREQ_SEGMENTS:
+            segment_samples = int(cls._SAMPLE_RATE * duration_sec)
+            consumed += segment_samples
+            segment_edges.append((consumed, frequency_hz))
+        if segment_edges:
+            segment_edges[-1] = (total_samples, segment_edges[-1][1])
+
+        samples: list[int] = []
+        attack_samples = max(1, int(cls._SAMPLE_RATE * cls._ATTACK_SEC))
+        release_samples = max(1, int(cls._SAMPLE_RATE * cls._RELEASE_SEC))
+
+        for index in range(total_samples):
+            frequency_hz = segment_edges[-1][1]
+            for edge_sample, candidate_hz in segment_edges:
+                if index < edge_sample:
+                    frequency_hz = candidate_hz
+                    break
+            envelope = 1.0
+            if index < attack_samples:
+                envelope = index / attack_samples
+            elif index >= total_samples - release_samples:
+                envelope = max(0.0, (total_samples - index) / release_samples)
+            sample = int(
+                cls._AMPLITUDE
+                * envelope
+                * math.sin(2.0 * math.pi * frequency_hz * (index / cls._SAMPLE_RATE))
+            )
+            samples.append(sample)
+        return struct.pack(f'<{len(samples)}h', *samples)
 
 
 class BareboneAttentionController:
@@ -371,7 +487,12 @@ server = AgentServer()
 
 
 class BareboneMoreTeaAgent(Agent):
-    def __init__(self, *, attention: BareboneAttentionController | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        attention: BareboneAttentionController | None = None,
+        thinking_cue: ThinkingCue | None = None,
+    ) -> None:
         self._base_instructions = os.getenv(
             'MORETEA_BAREBONE_INSTRUCTIONS',
             (
@@ -381,6 +502,7 @@ class BareboneMoreTeaAgent(Agent):
             ),
         )
         attention_mode = _env('MORETEA_ATTENTION_MODE', 'session').lower()
+        self._thinking_cue = thinking_cue or NullThinkingCue()
         self._attention = attention or BareboneAttentionController(
             _wake_keywords(),
             _env_allow_empty('MORETEA_SLEEP_PROMPT', "Say 'Hey MoreTea' to wake me up."),
@@ -419,6 +541,10 @@ class BareboneMoreTeaAgent(Agent):
         if decision.system_note and turn_ctx is not None:
             turn_ctx.add_message(role='system', content=decision.system_note)
         if decision.allow_response:
+            try:
+                await self._thinking_cue.play_start()
+            except Exception:  # pragma: no cover - defensive guard for custom cue providers
+                logger.exception('Thinking cue playback failed before agent response.')
             return
         if decision.prompt_to_say:
             await self.session.say(decision.prompt_to_say, allow_interruptions=True)
@@ -488,6 +614,7 @@ def _openclaw_llm() -> openai.LLM:
         'model': model,
         'api_key': api_key,
         'base_url': base_url,
+        'timeout': httpx.Timeout(connect=15.0, read=60.0, write=10.0, pool=5.0),
     }
     if agent_id:
         kwargs['extra_headers'] = {'x-openclaw-agent-id': agent_id}
@@ -576,7 +703,11 @@ async def barebone_agent(ctx: JobContext) -> None:
         preemptive_generation=False,
         allow_interruptions=True,
     )
-    await session.start(agent=BareboneMoreTeaAgent(), room=ctx.room)
+    thinking_cue = LocalThinkingCue(
+        enabled=_env_bool('MORETEA_THINKING_CUE_ENABLED', True),
+        volume=_env_float('MORETEA_THINKING_CUE_VOLUME', 0.35),
+    )
+    await session.start(agent=BareboneMoreTeaAgent(thinking_cue=thinking_cue), room=ctx.room)
 
 
 if __name__ == '__main__':
