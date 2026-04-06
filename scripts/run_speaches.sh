@@ -6,6 +6,8 @@ IMAGE="${SPEACHES_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cuda}"
 PORT="${SPEACHES_PORT:-8000}"
 VOLUME_NAME="${SPEACHES_VOLUME:-hf-hub-cache}"
 USE_GPU="${SPEACHES_USE_GPU:-1}"
+STT_MODEL="${SPEACHES_STT_MODEL:-Systran/faster-distil-whisper-small.en}"
+TTS_MODEL="${SPEACHES_TTS_MODEL:-speaches-ai/Kokoro-82M-v1.0-ONNX}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required to start Speaches." >&2
@@ -24,6 +26,8 @@ docker_args=(
   --publish "${PORT}:8000"
   --name "$CONTAINER_NAME"
   --volume "${VOLUME_NAME}:/home/ubuntu/.cache/huggingface/hub"
+  --env "WHISPER__MODEL=${STT_MODEL}"
+  --env "TTS__MODEL=${TTS_MODEL}"
 )
 
 if [[ "$USE_GPU" == "1" ]]; then
