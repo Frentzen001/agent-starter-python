@@ -10,6 +10,8 @@ from src.openclaw_barebone import (
     BareboneAttentionController,
     BareboneMoreTeaAgent,
     LocalThinkingCue,
+    _session_kwargs,
+    _wake_keywords,
 )
 
 
@@ -58,7 +60,7 @@ class BareboneAgentHarness(BareboneMoreTeaAgent):
 
 def build_attention(*, clock: Clock | None = None, allow_direct_cold_start: bool = True) -> BareboneAttentionController:
     return BareboneAttentionController(
-        ['moretea', 'more tea', 'hey moretea', 'hey more tea'],
+        ['hey', 'hi', 'hello', 'moretea', 'more tea', 'hey moretea', 'hey more tea'],
         '',
         idle_timeout_sec=20.0,
         passive_context_window_sec=20.0,
@@ -89,14 +91,24 @@ def test_strong_direct_request_cold_starts_without_name() -> None:
     assert controller.state is AttentionState.ENGAGED
 
 
-def test_standalone_hey_does_not_trigger_cold_start() -> None:
+def test_standalone_hey_triggers_engagement() -> None:
     controller = build_attention()
 
     decision = controller.evaluate('hey')
 
-    assert decision.allow_response is False
-    assert decision.classification == 'ambient'
-    assert controller.state is AttentionState.PASSIVE
+    assert decision.allow_response is True
+    assert decision.classification == 'wake'
+    assert controller.state is AttentionState.ENGAGED
+
+
+def test_standalone_hello_triggers_engagement() -> None:
+    controller = build_attention()
+
+    decision = controller.evaluate('hello')
+
+    assert decision.allow_response is True
+    assert decision.classification == 'wake'
+    assert controller.state is AttentionState.ENGAGED
 
 
 def test_passive_ambient_speech_is_buffered() -> None:
@@ -142,6 +154,15 @@ def test_emergency_phrase_bypasses_passive_gating() -> None:
     assert controller.state is AttentionState.ENGAGED
 
 
+def test_default_wake_keywords_include_basic_greetings() -> None:
+    with patch.dict('os.environ', {}, clear=True):
+        keywords = _wake_keywords()
+
+    assert 'hey' in keywords
+    assert 'hi' in keywords
+    assert 'hello' in keywords
+
+
 def test_agent_stops_ambient_turn_without_prompt_spam() -> None:
     session = FakeSession()
     cue = FakeThinkingCue()
@@ -149,7 +170,7 @@ def test_agent_stops_ambient_turn_without_prompt_spam() -> None:
 
     async def run() -> None:
         with pytest.raises(llm.StopResponse):
-            await agent.on_user_turn_completed(llm.ChatContext.empty(), SimpleNamespace(content=['hello there']))
+            await agent.on_user_turn_completed(llm.ChatContext.empty(), SimpleNamespace(content=['good morning everyone']))
         with pytest.raises(llm.StopResponse):
             await agent.on_user_turn_completed(llm.ChatContext.empty(), SimpleNamespace(content=['we should print this later']))
 
@@ -299,3 +320,22 @@ def test_local_thinking_cue_playback_failure_is_logged_safely(caplog: pytest.Log
         asyncio.run(run())
 
     assert 'Failed to play local thinking cue.' in caplog.text
+
+
+def test_session_defaults_allow_short_interruptions() -> None:
+    fake_ctx = SimpleNamespace(proc=SimpleNamespace(userdata={'vad': object()}))
+
+    with (
+        patch('src.openclaw_barebone._stt', return_value='stt'),
+        patch('src.openclaw_barebone._openclaw_llm', return_value='llm'),
+        patch('src.openclaw_barebone._tts', return_value='tts'),
+        patch('src.openclaw_barebone.MultilingualModel', return_value='turn-detector'),
+    ):
+        kwargs = _session_kwargs(fake_ctx)
+
+    assert kwargs['allow_interruptions'] is True
+    assert kwargs['min_interruption_duration'] == 0.12
+    assert kwargs['min_interruption_words'] == 0
+    assert kwargs['preemptive_generation'] is False
+    assert kwargs['turn_detection'] == 'turn-detector'
+    assert kwargs['vad'] is fake_ctx.proc.userdata['vad']

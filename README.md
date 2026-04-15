@@ -176,11 +176,24 @@ MORETEA_OPENCLAW_MODEL=openclaw
 MORETEA_OPENCLAW_TOKEN=<token>
 MORETEA_OPENCLAW_AGENT_ID=main
 
-MORETEA_WAKE_KEYWORDS=moretea,more tea,hey moretea,hey more tea
-MORETEA_SLEEP_PROMPT=Say 'Hey MoreTea' to wake me up.
+MORETEA_WAKE_KEYWORDS=hey,hi,hello,moretea,more tea,hey moretea,hey more tea
+MORETEA_SLEEP_PROMPT=Say 'hey', 'hi', 'hello', or 'Hey MoreTea' to wake me up.
 MORETEA_SLEEP_PROMPT_COOLDOWN_SEC=8
+MORETEA_ALLOW_INTERRUPTIONS=1
+MORETEA_MIN_INTERRUPTION_DURATION_SEC=0.12
+MORETEA_MIN_INTERRUPTION_WORDS=0
 MORETEA_THINKING_CUE_ENABLED=1
 MORETEA_THINKING_CUE_VOLUME=0.35
+
+# Read timeout for the OpenClaw LLM HTTP connection (seconds).
+# Increase if long tool-call pipelines (e.g. navigation) exceed the default.
+MORETEA_OPENCLAW_READ_TIMEOUT_SEC=180
+
+# Spoken cue played when OpenClaw takes longer than MORETEA_SLOW_RESPONSE_DELAY_SEC
+# to return the first token. Useful to fill the silence during navigation.
+# Leave empty to disable.
+MORETEA_SLOW_RESPONSE_CUE=On my way, just a moment.
+MORETEA_SLOW_RESPONSE_DELAY_SEC=7
 ```
 
 ### Thinking Cue

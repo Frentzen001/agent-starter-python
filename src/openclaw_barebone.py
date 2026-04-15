@@ -10,10 +10,14 @@ import time
 
 import httpx
 from collections import deque
+from collections.abc import AsyncIterable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 try:
     from dotenv import load_dotenv
@@ -164,6 +168,9 @@ class LocalThinkingCue(ThinkingCue):
 class BareboneAttentionController:
     _EMERGENCY_PHRASES = ('stop', 'stop!', 'watch out', 'danger', 'emergency')
     _DIRECT_PATTERNS = (
+        'hey',
+        'hi',
+        'hello',
         'can you',
         'could you',
         'would you',
@@ -230,7 +237,7 @@ class BareboneAttentionController:
         'look',
         'listen',
     )
-    _WEAK_PHRASES = {'hey', 'hi', 'hello', 'okay', 'ok', 'yeah', 'hmm', 'uh', 'um'}
+    _WEAK_PHRASES = {'hmm', 'uh', 'um'}
 
     def __init__(
         self,
@@ -271,7 +278,15 @@ class BareboneAttentionController:
         return re.sub(r'\s+', ' ', text).strip()
 
     def _contains_keyword(self, normalized_text: str) -> bool:
-        return any(keyword in normalized_text for keyword in self._keywords)
+        words = normalized_text.split()
+        text_with_boundaries = f" {' '.join(words)} "
+        for keyword in self._keywords:
+            keyword_words = keyword.split()
+            if not keyword_words:
+                continue
+            if f" {' '.join(keyword_words)} " in text_with_boundaries:
+                return True
+        return False
 
     def _contains_emergency_phrase(self, normalized_text: str) -> bool:
         return any(phrase in normalized_text for phrase in self._EMERGENCY_PHRASES)
@@ -505,7 +520,7 @@ class BareboneMoreTeaAgent(Agent):
         self._thinking_cue = thinking_cue or NullThinkingCue()
         self._attention = attention or BareboneAttentionController(
             _wake_keywords(),
-            _env_allow_empty('MORETEA_SLEEP_PROMPT', "Say 'Hey MoreTea' to wake me up."),
+            _env_allow_empty('MORETEA_SLEEP_PROMPT', "Say 'hey', 'hi', 'hello', or 'Hey MoreTea' to wake me up."),
             idle_timeout_sec=_env_float('MORETEA_IDLE_TIMEOUT_SEC', 20.0),
             passive_context_window_sec=_env_float('MORETEA_PASSIVE_CONTEXT_WINDOW_SEC', 20.0),
             cooldown_sec=_env_float('MORETEA_SLEEP_PROMPT_COOLDOWN_SEC', 4.0),
@@ -550,6 +565,38 @@ class BareboneMoreTeaAgent(Agent):
             await self.session.say(decision.prompt_to_say, allow_interruptions=True)
         raise llm.StopResponse()
 
+    async def llm_node(
+        self,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.FunctionTool],
+        model_settings: Any = None,
+    ) -> AsyncIterable[llm.ChatChunk]:
+        phrase = _env('MORETEA_SLOW_RESPONSE_CUE', '')
+        delay = _env_float('MORETEA_SLOW_RESPONSE_DELAY_SEC', 7.0)
+
+        if not phrase:
+            async for chunk in super().llm_node(chat_ctx, tools, model_settings):
+                yield chunk
+            return
+
+        first_token = asyncio.Event()
+
+        async def _say_if_slow() -> None:
+            await asyncio.sleep(delay)
+            if not first_token.is_set():
+                with suppress(Exception):
+                    await self.session.say(phrase, allow_interruptions=True)
+
+        cue_task = asyncio.create_task(_say_if_slow())
+        try:
+            async for chunk in super().llm_node(chat_ctx, tools, model_settings):
+                first_token.set()
+                yield chunk
+        finally:
+            cue_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cue_task
+
 
 def _env(name: str, default: str = '') -> str:
     value = os.getenv(name)
@@ -583,13 +630,47 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    value = _env(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def _wake_keywords() -> list[str]:
     raw = _env('MORETEA_WAKE_KEYWORDS')
-    default_keywords = ['moretea', 'more tea', 'hey moretea', 'hey more tea', 'morti', 'morty']
+    default_keywords = [
+        'hey',
+        'hi',
+        'hello',
+        'moretea',
+        'more tea',
+        'hey moretea',
+        'hey more tea',
+        'morti',
+        'morty',
+    ]
     if not raw:
         return default_keywords
     keywords = [item.strip() for item in raw.split(',') if item.strip()]
     return keywords or default_keywords
+
+
+def _session_kwargs(ctx: JobContext) -> dict[str, object]:
+    return {
+        'stt': _stt(),
+        'llm': _openclaw_llm(),
+        'tts': _tts(),
+        'turn_detection': MultilingualModel(),
+        'vad': ctx.proc.userdata['vad'],
+        'preemptive_generation': False,
+        'allow_interruptions': _env_bool('MORETEA_ALLOW_INTERRUPTIONS', True),
+        'min_interruption_duration': _env_float('MORETEA_MIN_INTERRUPTION_DURATION_SEC', 0.12),
+        'min_interruption_words': _env_int('MORETEA_MIN_INTERRUPTION_WORDS', 0),
+    }
 
 
 def _require(name: str) -> str:
@@ -614,7 +695,12 @@ def _openclaw_llm() -> openai.LLM:
         'model': model,
         'api_key': api_key,
         'base_url': base_url,
-        'timeout': httpx.Timeout(connect=15.0, read=60.0, write=10.0, pool=5.0),
+        'timeout': httpx.Timeout(
+            connect=15.0,
+            read=_env_float('MORETEA_OPENCLAW_READ_TIMEOUT_SEC', 180.0),
+            write=10.0,
+            pool=5.0,
+        ),
     }
     if agent_id:
         kwargs['extra_headers'] = {'x-openclaw-agent-id': agent_id}
@@ -694,15 +780,7 @@ server.setup_fnc = prewarm
 @server.rtc_session(agent_name=os.getenv('MORETEA_BAREBONE_AGENT_NAME', 'moretea-barebone'))
 async def barebone_agent(ctx: JobContext) -> None:
     await ctx.connect()
-    session = AgentSession(
-        stt=_stt(),
-        llm=_openclaw_llm(),
-        tts=_tts(),
-        turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata['vad'],
-        preemptive_generation=False,
-        allow_interruptions=True,
-    )
+    session = AgentSession(**_session_kwargs(ctx))
     thinking_cue = LocalThinkingCue(
         enabled=_env_bool('MORETEA_THINKING_CUE_ENABLED', True),
         volume=_env_float('MORETEA_THINKING_CUE_VOLUME', 0.35),
