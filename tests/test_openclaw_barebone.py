@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 from livekit.agents import llm
 
@@ -10,6 +11,7 @@ from src.openclaw_barebone import (
     BareboneAttentionController,
     BareboneMoreTeaAgent,
     LocalThinkingCue,
+    _openclaw_llm,
     _session_kwargs,
     _wake_keywords,
 )
@@ -339,3 +341,47 @@ def test_session_defaults_allow_short_interruptions() -> None:
     assert kwargs['preemptive_generation'] is False
     assert kwargs['turn_detection'] == 'turn-detector'
     assert kwargs['vad'] is fake_ctx.proc.userdata['vad']
+
+
+def test_openclaw_llm_uses_default_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeLLM:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setenv('MORETEA_OPENCLAW_URL', 'http://127.0.0.1:18790/v1')
+    monkeypatch.setenv('MORETEA_OPENCLAW_TOKEN', 'token')
+    monkeypatch.setenv('MORETEA_OPENCLAW_MODEL', 'openclaw')
+    monkeypatch.setenv('MORETEA_OPENCLAW_AGENT_ID', 'main')
+    monkeypatch.setattr('src.openclaw_barebone.openai.LLM', FakeLLM)
+
+    _openclaw_llm()
+
+    timeout = captured['timeout']
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 15.0
+    assert timeout.read == 180.0
+    assert timeout.write == 10.0
+    assert timeout.pool == 5.0
+    assert captured['extra_headers'] == {'x-openclaw-agent-id': 'main'}
+
+
+def test_openclaw_llm_allows_read_timeout_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeLLM:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setenv('MORETEA_OPENCLAW_URL', 'http://127.0.0.1:18790/v1')
+    monkeypatch.setenv('MORETEA_OPENCLAW_TOKEN', 'token')
+    monkeypatch.setenv('MORETEA_OPENCLAW_MODEL', 'openclaw')
+    monkeypatch.setenv('MORETEA_OPENCLAW_READ_TIMEOUT_SEC', '240')
+    monkeypatch.setattr('src.openclaw_barebone.openai.LLM', FakeLLM)
+
+    _openclaw_llm()
+
+    timeout = captured['timeout']
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.read == 240.0

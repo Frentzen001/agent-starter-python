@@ -186,7 +186,8 @@ MORETEA_THINKING_CUE_ENABLED=1
 MORETEA_THINKING_CUE_VOLUME=0.35
 
 # Read timeout for the OpenClaw LLM HTTP connection (seconds).
-# Increase if long tool-call pipelines (e.g. navigation) exceed the default.
+# This only protects the outer LiveKit -> OpenClaw request.
+# It does not prevent OpenClaw itself from timing out earlier while calling OpenAI.
 MORETEA_OPENCLAW_READ_TIMEOUT_SEC=180
 
 # Spoken cue played when OpenClaw takes longer than MORETEA_SLOW_RESPONSE_DELAY_SEC
@@ -208,6 +209,11 @@ Current controls:
 
 - `MORETEA_THINKING_CUE_ENABLED=1`
 - `MORETEA_THINKING_CUE_VOLUME=0.35`
+
+Timeout note:
+
+- `MORETEA_OPENCLAW_READ_TIMEOUT_SEC` is still worth keeping as outer-request protection.
+- It is not proof that post-tool reply failures are solved, because OpenClaw can still fail earlier in its own upstream model call.
 
 Current behavior:
 
