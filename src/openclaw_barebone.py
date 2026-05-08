@@ -17,8 +17,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:  # pragma: no cover - optional dependency
@@ -667,7 +665,7 @@ def _session_kwargs(ctx: JobContext) -> dict[str, object]:
         'turn_detection': MultilingualModel(),
         'vad': ctx.proc.userdata['vad'],
         'preemptive_generation': False,
-        'allow_interruptions': _env_bool('MORETEA_ALLOW_INTERRUPTIONS', True),
+        'allow_interruptions': _env_bool('MORETEA_ALLOW_INTERRUPTIONS', False),
         'min_interruption_duration': _env_float('MORETEA_MIN_INTERRUPTION_DURATION_SEC', 0.12),
         'min_interruption_words': _env_int('MORETEA_MIN_INTERRUPTION_WORDS', 0),
     }
